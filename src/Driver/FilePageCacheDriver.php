@@ -12,6 +12,7 @@ use Marko\PageCache\Config\PageCacheConfig;
 use Marko\PageCache\Contracts\PageCacheInterface;
 use Marko\Routing\Http\Request;
 use Marko\Routing\Http\Response;
+use Psr\Clock\ClockInterface;
 use Random\RandomException;
 
 readonly class FilePageCacheDriver implements PageCacheInterface
@@ -19,6 +20,7 @@ readonly class FilePageCacheDriver implements PageCacheInterface
     public function __construct(
         private PageCacheConfig $pageCache,
         private ProjectPaths $paths,
+        private ClockInterface $clock,
     ) {}
 
     /**
@@ -50,7 +52,7 @@ readonly class FilePageCacheDriver implements PageCacheInterface
             return null;
         }
 
-        if ($data['expires_at'] !== null && $data['expires_at'] < time()) {
+        if ($data['expires_at'] !== null && $data['expires_at'] < $this->clock->now()->getTimestamp()) {
             @unlink($path);
 
             return null;
@@ -73,15 +75,15 @@ readonly class FilePageCacheDriver implements PageCacheInterface
     ): Response {
         $key = CacheKey::fromRequest($request);
         $ttl = $policy->ttl > 0 ? $policy->ttl : $this->pageCache->defaultTtl();
-        $expiresAt = $ttl > 0 ? time() + $ttl : null;
+        $now = $this->clock->now()->getTimestamp();
 
         $data = [
             'status_code' => $response->statusCode(),
             'body' => $response->body(),
             'headers' => $response->headers(),
             'tags' => $policy->tags,
-            'expires_at' => $expiresAt,
-            'created_at' => time(),
+            'expires_at' => $ttl > 0 ? $now + $ttl : null,
+            'created_at' => $now,
         ];
 
         $this->ensureDirectory($this->pagesDir());

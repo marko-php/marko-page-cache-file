@@ -7,13 +7,15 @@ require_once __DIR__ . '/../../helpers.php';
 use Marko\PageCache\CacheKey;
 use Marko\PageCache\CachePolicy;
 use Marko\Routing\Http\Response;
+use Marko\Testing\Fake\FakeClock;
 
 $tmpDir = null;
 
 beforeEach(function () use (&$tmpDir): void {
     $tmpDir = sys_get_temp_dir() . '/page-cache-test-' . bin2hex(random_bytes(8));
     $this->tmpDir = $tmpDir;
-    $this->driver = createPageCacheFileDriver($tmpDir);
+    $this->clock = new FakeClock('2026-01-01 12:00:00 UTC');
+    $this->driver = createPageCacheFileDriver($tmpDir, clock: $this->clock);
 });
 
 afterEach(function () use (&$tmpDir): void {
@@ -48,7 +50,7 @@ it('returns the stored Response on lookup when the entry is fresh', function ():
 it('returns null on lookup when the entry has expired and deletes the expired file', function (): void {
     $request = createTestRequest('GET', '/test');
     $key = CacheKey::fromRequest($request);
-    writeExpiredPageCacheEntry($this->tmpDir, $key->hash());
+    writeExpiredPageCacheEntry($this->tmpDir, $key->hash(), $this->clock->now()->getTimestamp());
 
     $result = $this->driver->lookup($request);
 
@@ -73,8 +75,8 @@ it('stores a Response with status code, body, headers, ttl, and tags', function 
         ->and($data['body'])->toBe('<html>product</html>')
         ->and($data['headers'])->toBe(['Content-Type' => 'text/html'])
         ->and($data['tags'])->toBe(['product-1', 'category-5'])
-        ->and($data['expires_at'])->toBeGreaterThan(time())
-        ->and($data['created_at'])->toBeGreaterThan(0);
+        ->and($data['expires_at'])->toBe($this->clock->now()->getTimestamp() + 600)
+        ->and($data['created_at'])->toBe($this->clock->now()->getTimestamp());
 });
 
 it('returns the same Response from store unchanged in v1', function (): void {
@@ -89,7 +91,7 @@ it('returns the same Response from store unchanged in v1', function (): void {
 
 it('uses the configured default ttl when CachePolicy ttl equals zero', function (): void {
     $defaultTtl = 1800;
-    $driver = createPageCacheFileDriver($this->tmpDir, $defaultTtl);
+    $driver = createPageCacheFileDriver($this->tmpDir, $defaultTtl, $this->clock);
     $request = createTestRequest('GET', '/test');
     $response = new Response(body: 'body', statusCode: 200);
     $policy = new CachePolicy(ttl: 0, tags: []);
@@ -100,8 +102,7 @@ it('uses the configured default ttl when CachePolicy ttl equals zero', function 
     $filePath = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
     $data = unserialize(file_get_contents($filePath));
 
-    expect($data['expires_at'])->toBeGreaterThan(time() + $defaultTtl - 5)
-        ->and($data['expires_at'])->toBeLessThanOrEqual(time() + $defaultTtl + 5);
+    expect($data['expires_at'])->toBe($this->clock->now()->getTimestamp() + $defaultTtl);
 });
 
 it('uses an explicit ttl from CachePolicy when greater than zero', function (): void {
@@ -116,8 +117,7 @@ it('uses an explicit ttl from CachePolicy when greater than zero', function (): 
     $filePath = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
     $data = unserialize(file_get_contents($filePath));
 
-    expect($data['expires_at'])->toBeGreaterThan(time() + $explicitTtl - 5)
-        ->and($data['expires_at'])->toBeLessThanOrEqual(time() + $explicitTtl + 5);
+    expect($data['expires_at'])->toBe($this->clock->now()->getTimestamp() + $explicitTtl);
 });
 
 it('deletes the corresponding cache file when purgeUrl is called for an existing URL', function (): void {
@@ -253,8 +253,8 @@ it('hydrates a cache entry written before cookies existed without error', functi
         'status_code' => 200,
         'body' => 'legacy body',
         'headers' => ['X-Legacy' => 'yes'],
-        'expires_at' => time() + 9999,
-        'created_at' => time(),
+        'expires_at' => $this->clock->now()->getTimestamp() + 9999,
+        'created_at' => $this->clock->now()->getTimestamp(),
     ]);
 
     file_put_contents($pagesDir . '/' . $key->hash() . '.cache', $legacyPayload);
@@ -283,8 +283,8 @@ it('does not instantiate a disallowed class when decoding a tampered page-cache 
         'status_code' => 200,
         'body' => new stdClass(),
         'headers' => [],
-        'expires_at' => time() + 9999,
-        'created_at' => time(),
+        'expires_at' => $this->clock->now()->getTimestamp() + 9999,
+        'created_at' => $this->clock->now()->getTimestamp(),
     ]);
 
     file_put_contents($pagesDir . '/' . $key->hash() . '.cache', $payloadWithObject);
@@ -295,4 +295,24 @@ it('does not instantiate a disallowed class when decoding a tampered page-cache 
     // Either it returns null (guards reject the non-string body) or it returns a
     // Response whose body is NOT a stdClass instance.
     expect($result)->toBeNull();
+});
+
+it('serves a stored page until its ttl has elapsed on the clock', function (): void {
+    $request = createTestRequest('GET', '/clock');
+    $this->driver->store($request, new Response(body: 'fresh', statusCode: 200), new CachePolicy(ttl: 60, tags: []));
+
+    $this->clock->travel('+60 seconds');
+
+    expect($this->driver->lookup($request)?->body())->toBe('fresh');
+});
+
+it('misses a stored page once the clock passes its expiry', function (): void {
+    $request = createTestRequest('GET', '/clock');
+    $this->driver->store($request, new Response(body: 'fresh', statusCode: 200), new CachePolicy(ttl: 60, tags: []));
+
+    $this->clock->travel('+61 seconds');
+    $cacheFile = $this->tmpDir . '/pages/' . CacheKey::fromRequest($request)->hash() . '.cache';
+
+    expect($this->driver->lookup($request))->toBeNull()
+        ->and(file_exists($cacheFile))->toBeFalse();
 });

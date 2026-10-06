@@ -34,6 +34,14 @@ it('depends on marko/page-cache', function (): void {
         ->and($composer['require']['marko/page-cache'])->toBe('self.version');
 });
 
+it('depends on marko/clock', function (): void {
+    $composerPath = dirname(__DIR__) . '/composer.json';
+    $composer = json_decode(file_get_contents($composerPath), true);
+
+    expect($composer['require'])->toHaveKey('marko/clock')
+        ->and($composer['require']['marko/clock'])->toBe('self.version');
+});
+
 it('binds PageCacheInterface to FilePageCacheDriver in module.php', function (): void {
     $modulePath = dirname(__DIR__) . '/module.php';
 
