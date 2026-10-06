@@ -29,7 +29,7 @@ afterEach(function () use (&$tmpDir): void {
 it('returns null on lookup when no entry exists for the request', function (): void {
     $request = createTestRequest('GET', '/test');
 
-    $result = $this->driver->lookup($request);
+    $result = $this->driver->lookup($request, []);
 
     expect($result)->toBeNull();
 });
@@ -40,7 +40,7 @@ it('returns the stored Response on lookup when the entry is fresh', function ():
     $policy = new CachePolicy(ttl: 3600, tags: []);
 
     $this->driver->store($request, $response, $policy);
-    $result = $this->driver->lookup($request);
+    $result = $this->driver->lookup($request, []);
 
     expect($result)->toBeInstanceOf(Response::class)
         ->and($result->statusCode())->toBe(200)
@@ -50,10 +50,10 @@ it('returns the stored Response on lookup when the entry is fresh', function ():
 
 it('returns null on lookup when the entry has expired and deletes the expired file', function (): void {
     $request = createTestRequest('GET', '/test');
-    $key = CacheKey::fromRequest($request);
+    $key = CacheKey::fromRequest($request, []);
     writeExpiredPageCacheEntry($this->tmpDir, $key->hash(), $this->clock->now()->getTimestamp());
 
-    $result = $this->driver->lookup($request);
+    $result = $this->driver->lookup($request, []);
 
     $cacheFile = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
     expect($result)->toBeNull()
@@ -67,7 +67,7 @@ it('stores a Response with status code, body, headers, ttl, and tags', function 
 
     $this->driver->store($request, $response, $policy);
 
-    $key = CacheKey::fromRequest($request);
+    $key = CacheKey::fromRequest($request, []);
     $filePath = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
     $data = unserialize(file_get_contents($filePath));
 
@@ -99,7 +99,7 @@ it('uses the configured default ttl when CachePolicy ttl equals zero', function 
 
     $driver->store($request, $response, $policy);
 
-    $key = CacheKey::fromRequest($request);
+    $key = CacheKey::fromRequest($request, []);
     $filePath = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
     $data = unserialize(file_get_contents($filePath));
 
@@ -114,7 +114,7 @@ it('uses an explicit ttl from CachePolicy when greater than zero', function (): 
 
     $this->driver->store($request, $response, $policy);
 
-    $key = CacheKey::fromRequest($request);
+    $key = CacheKey::fromRequest($request, []);
     $filePath = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
     $data = unserialize(file_get_contents($filePath));
 
@@ -128,7 +128,7 @@ it('deletes the corresponding cache file when purgeUrl is called for an existing
 
     $this->driver->store($request, $response, $policy);
 
-    $key = CacheKey::fromRequest($request);
+    $key = CacheKey::fromRequest($request, []);
     $filePath = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
 
     expect(file_exists($filePath))->toBeTrue();
@@ -149,16 +149,16 @@ it('keeps pages for the same path on different hosts apart', function (): void {
     $policy = new CachePolicy(ttl: 3600, tags: []);
     $this->driver->store(createTestRequest('GET', '/home', host: 'a.example.com'), new Response(body: 'A'), $policy);
 
-    expect($this->driver->lookup(createTestRequest('GET', '/home', host: 'b.example.com')))->toBeNull()
-        ->and($this->driver->lookup(createTestRequest('GET', '/home', host: 'a.example.com'))?->body())->toBe('A');
+    expect($this->driver->lookup(createTestRequest('GET', '/home', host: 'b.example.com'), []))->toBeNull()
+        ->and($this->driver->lookup(createTestRequest('GET', '/home', host: 'a.example.com'), [])?->body())->toBe('A');
 });
 
 it('keeps pages for the same path over http and https apart', function (): void {
     $policy = new CachePolicy(ttl: 3600, tags: []);
     $this->driver->store(createTestRequest('GET', '/home', https: true), new Response(body: 'secure'), $policy);
 
-    expect($this->driver->lookup(createTestRequest('GET', '/home')))->toBeNull()
-        ->and($this->driver->lookup(createTestRequest('GET', '/home', https: true))?->body())->toBe('secure');
+    expect($this->driver->lookup(createTestRequest('GET', '/home'), []))->toBeNull()
+        ->and($this->driver->lookup(createTestRequest('GET', '/home', https: true), [])?->body())->toBe('secure');
 });
 
 it('purges a URL over both http and https', function (): void {
@@ -168,8 +168,8 @@ it('purges a URL over both http and https', function (): void {
 
     $this->driver->purgeUrl('https://example.com/home');
 
-    expect($this->driver->lookup(createTestRequest('GET', '/home')))->toBeNull()
-        ->and($this->driver->lookup(createTestRequest('GET', '/home', https: true)))->toBeNull();
+    expect($this->driver->lookup(createTestRequest('GET', '/home'), []))->toBeNull()
+        ->and($this->driver->lookup(createTestRequest('GET', '/home', https: true), []))->toBeNull();
 });
 
 it('purges a relative URL for every exact trusted host', function (): void {
@@ -179,8 +179,8 @@ it('purges a relative URL for every exact trusted host', function (): void {
     $driver->store(createTestRequest('GET', '/home', host: 'www.example.com'), new Response(body: 'www'), $policy);
 
     expect($driver->purgeUrl('/home'))->toBeTrue()
-        ->and($driver->lookup(createTestRequest('GET', '/home')))->toBeNull()
-        ->and($driver->lookup(createTestRequest('GET', '/home', host: 'www.example.com')))->toBeNull();
+        ->and($driver->lookup(createTestRequest('GET', '/home'), []))->toBeNull()
+        ->and($driver->lookup(createTestRequest('GET', '/home', host: 'www.example.com'), []))->toBeNull();
 });
 
 it('fails loudly when purging a relative URL without any trusted host', function (): void {
@@ -193,11 +193,11 @@ it(
     function (): void {
         $request = createTestRequest('GET', '/search', ['q' => 'hello', 'page' => '2']);
         $response = new Response(body: 'search results', statusCode: 200);
-        $policy = new CachePolicy(ttl: 3600, tags: []);
+        $policy = new CachePolicy(ttl: 3600, tags: [], queryParams: ['q', 'page']);
 
         $this->driver->store($request, $response, $policy);
 
-        $key = CacheKey::fromRequest($request);
+        $key = CacheKey::fromRequest($request, ['q', 'page']);
         $filePath = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
 
         expect(file_exists($filePath))->toBeTrue();
@@ -214,11 +214,11 @@ it(
     function (): void {
         $request = createTestRequest('GET', '/items', ['a' => '1', 'b' => '2']);
         $response = new Response(body: 'items page', statusCode: 200);
-        $policy = new CachePolicy(ttl: 3600, tags: []);
+        $policy = new CachePolicy(ttl: 3600, tags: [], queryParams: ['a', 'b']);
 
         $this->driver->store($request, $response, $policy);
 
-        $key = CacheKey::fromRequest($request);
+        $key = CacheKey::fromRequest($request, ['a', 'b']);
         $filePath = $this->tmpDir . '/pages/' . $key->hash() . '.cache';
 
         expect(file_exists($filePath))->toBeTrue();
@@ -264,7 +264,7 @@ it('still round-trips a legitimately stored page-cache entry', function (): void
     $policy = new CachePolicy(ttl: 3600, tags: []);
 
     $this->driver->store($request, $response, $policy);
-    $result = $this->driver->lookup($request);
+    $result = $this->driver->lookup($request, []);
 
     expect($result)->toBeInstanceOf(Response::class)
         ->and($result->body())->toBe('Hello Roundtrip')
@@ -278,7 +278,7 @@ it('hydrates a cached response with no cookies', function (): void {
     $policy = new CachePolicy(ttl: 3600, tags: []);
 
     $this->driver->store($request, $response, $policy);
-    $result = $this->driver->lookup($request);
+    $result = $this->driver->lookup($request, []);
 
     expect($result)->toBeInstanceOf(Response::class)
         ->and($result->cookies())->toBeEmpty();
@@ -286,7 +286,7 @@ it('hydrates a cached response with no cookies', function (): void {
 
 it('hydrates a cache entry written before cookies existed without error', function (): void {
     $request = createTestRequest('GET', '/legacy');
-    $key = CacheKey::fromRequest($request);
+    $key = CacheKey::fromRequest($request, []);
     $pagesDir = $this->tmpDir . '/pages';
 
     if (!is_dir($pagesDir)) {
@@ -303,7 +303,7 @@ it('hydrates a cache entry written before cookies existed without error', functi
 
     file_put_contents($pagesDir . '/' . $key->hash() . '.cache', $legacyPayload);
 
-    $result = $this->driver->lookup($request);
+    $result = $this->driver->lookup($request, []);
 
     expect($result)->toBeInstanceOf(Response::class)
         ->and($result->body())->toBe('legacy body')
@@ -312,7 +312,7 @@ it('hydrates a cache entry written before cookies existed without error', functi
 
 it('does not instantiate a disallowed class when decoding a tampered page-cache payload', function (): void {
     $request = createTestRequest('GET', '/tampered');
-    $key = CacheKey::fromRequest($request);
+    $key = CacheKey::fromRequest($request, []);
     $pagesDir = $this->tmpDir . '/pages';
 
     if (!is_dir($pagesDir)) {
@@ -333,7 +333,7 @@ it('does not instantiate a disallowed class when decoding a tampered page-cache 
 
     file_put_contents($pagesDir . '/' . $key->hash() . '.cache', $payloadWithObject);
 
-    $result = $this->driver->lookup($request);
+    $result = $this->driver->lookup($request, []);
 
     // The driver must not return a Response containing a live stdClass body.
     // Either it returns null (guards reject the non-string body) or it returns a
@@ -347,7 +347,7 @@ it('serves a stored page until its ttl has elapsed on the clock', function (): v
 
     $this->clock->travel('+60 seconds');
 
-    expect($this->driver->lookup($request)?->body())->toBe('fresh');
+    expect($this->driver->lookup($request, [])?->body())->toBe('fresh');
 });
 
 it('misses a stored page once the clock passes its expiry', function (): void {
@@ -355,9 +355,9 @@ it('misses a stored page once the clock passes its expiry', function (): void {
     $this->driver->store($request, new Response(body: 'fresh', statusCode: 200), new CachePolicy(ttl: 60, tags: []));
 
     $this->clock->travel('+61 seconds');
-    $cacheFile = $this->tmpDir . '/pages/' . CacheKey::fromRequest($request)->hash() . '.cache';
+    $cacheFile = $this->tmpDir . '/pages/' . CacheKey::fromRequest($request, [])->hash() . '.cache';
 
-    expect($this->driver->lookup($request))->toBeNull()
+    expect($this->driver->lookup($request, []))->toBeNull()
         ->and(file_exists($cacheFile))->toBeFalse();
 });
 
@@ -367,7 +367,7 @@ it('serves an entry stored with a zero effective ttl', function (): void {
 
     $driver->store($request, new Response(body: 'forever', statusCode: 200), new CachePolicy(ttl: 0, tags: []));
 
-    expect($driver->lookup($request)?->body())->toBe('forever');
+    expect($driver->lookup($request, [])?->body())->toBe('forever');
 });
 
 it('keeps serving a never-expiring entry however far the clock advances', function (): void {
@@ -377,7 +377,7 @@ it('keeps serving a never-expiring entry however far the clock advances', functi
     $driver->store($request, new Response(body: 'forever', statusCode: 200), new CachePolicy(ttl: 0, tags: []));
     $this->clock->travel('+50 years');
 
-    expect($driver->lookup($request)?->body())->toBe('forever');
+    expect($driver->lookup($request, [])?->body())->toBe('forever');
 });
 
 it('removes a never-expiring entry with purgeUrl, purgeTag and clear', function (): void {
@@ -387,17 +387,17 @@ it('removes a never-expiring entry with purgeUrl, purgeTag and clear', function 
     $policy = new CachePolicy(ttl: 0, tags: ['pages']);
 
     $driver->store($request, $response, $policy);
-    $servedBeforePurge = $driver->lookup($request);
+    $servedBeforePurge = $driver->lookup($request, []);
     $driver->purgeUrl('http://example.com/forever');
-    $afterPurgeUrl = $driver->lookup($request);
+    $afterPurgeUrl = $driver->lookup($request, []);
 
     $driver->store($request, $response, $policy);
     $driver->purgeTag('pages');
-    $afterPurgeTag = $driver->lookup($request);
+    $afterPurgeTag = $driver->lookup($request, []);
 
     $driver->store($request, $response, $policy);
     $driver->clear();
-    $afterClear = $driver->lookup($request);
+    $afterClear = $driver->lookup($request, []);
 
     expect($servedBeforePurge)->toBeInstanceOf(Response::class)
         ->and($afterPurgeUrl)->toBeNull()
@@ -407,19 +407,19 @@ it('removes a never-expiring entry with purgeUrl, purgeTag and clear', function 
 
 it('treats a payload without expires_at as a miss', function (): void {
     $request = createTestRequest('GET', '/corrupt');
-    writePageCachePayload($this->tmpDir, CacheKey::fromRequest($request)->hash(), [
+    writePageCachePayload($this->tmpDir, CacheKey::fromRequest($request, [])->hash(), [
         'status_code' => 200,
         'body' => 'corrupt',
         'headers' => [],
         'created_at' => $this->clock->now()->getTimestamp(),
     ]);
 
-    expect($this->driver->lookup($request))->toBeNull();
+    expect($this->driver->lookup($request, []))->toBeNull();
 });
 
 it('treats a payload with a non-integer expires_at as a miss', function (): void {
     $request = createTestRequest('GET', '/corrupt');
-    writePageCachePayload($this->tmpDir, CacheKey::fromRequest($request)->hash(), [
+    writePageCachePayload($this->tmpDir, CacheKey::fromRequest($request, [])->hash(), [
         'status_code' => 200,
         'body' => 'corrupt',
         'headers' => [],
@@ -427,5 +427,5 @@ it('treats a payload with a non-integer expires_at as a miss', function (): void
         'created_at' => $this->clock->now()->getTimestamp(),
     ]);
 
-    expect($this->driver->lookup($request))->toBeNull();
+    expect($this->driver->lookup($request, []))->toBeNull();
 });

@@ -10,8 +10,12 @@ use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
 use Psr\Clock\ClockInterface;
 
-function createPageCacheConfig(string $path, int $defaultTtl = 3600, array $trustedHosts = []): PageCacheConfig
-{
+function createPageCacheConfig(
+    string $path,
+    int $defaultTtl = 3600,
+    array $trustedHosts = [],
+    int $maxVariantsPerPath = 1000,
+): PageCacheConfig {
     return new PageCacheConfig(new FakeConfigRepository([
         'page-cache.driver' => 'file',
         'page-cache.path' => $path,
@@ -19,6 +23,7 @@ function createPageCacheConfig(string $path, int $defaultTtl = 3600, array $trus
         'page-cache.cacheable_status_codes' => [200],
         'page-cache.cacheable_methods' => ['GET'],
         'page-cache.trusted_hosts' => $trustedHosts,
+        'page-cache.max_variants_per_path' => $maxVariantsPerPath,
     ]));
 }
 
@@ -43,9 +48,10 @@ function createPageCacheFileDriver(
     int $defaultTtl = 3600,
     ?ClockInterface $clock = null,
     array $trustedHosts = [],
+    int $maxVariantsPerPath = 1000,
 ): FilePageCacheDriver {
     return new FilePageCacheDriver(
-        createPageCacheConfig($tmpDir, $defaultTtl, $trustedHosts),
+        createPageCacheConfig($tmpDir, $defaultTtl, $trustedHosts, $maxVariantsPerPath),
         new ProjectPaths($tmpDir),
         $clock ?? new FakeClock(),
     );

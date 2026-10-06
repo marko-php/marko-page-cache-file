@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Marko\PageCache\File\Driver;
 
+use FilesystemIterator;
 use Marko\Config\Exceptions\ConfigNotFoundException;
 use Marko\Core\Path\ProjectPaths;
 use Marko\PageCache\CacheKey;
@@ -15,9 +16,21 @@ use Marko\Routing\Http\Request;
 use Marko\Routing\Http\Response;
 use Psr\Clock\ClockInterface;
 use Random\RandomException;
+use SplFileInfo;
 
+/**
+ * Stores pages as files under {path}/pages/{hash}.cache.
+ *
+ * Tag membership is a directory per tag holding one empty marker file per page
+ * ({path}/tags/{tag-hash}/{page-hash}), so tagging a page is a single file create
+ * with no shared index to read, rewrite or lock. The variants of each URL path are
+ * tracked the same way under {path}/variants/{path-hash}/ to enforce
+ * page-cache.max_variants_per_path.
+ */
 readonly class FilePageCacheDriver implements PageCacheInterface
 {
+    private const string HASH_PATTERN = '/^[0-9a-f]{32}$/';
+
     public function __construct(
         private PageCacheConfig $pageCache,
         private ProjectPaths $paths,
@@ -25,11 +38,15 @@ readonly class FilePageCacheDriver implements PageCacheInterface
     ) {}
 
     /**
+     * @param array<string> $queryParams
+     *
      * @throws ConfigNotFoundException
      */
-    public function lookup(Request $request): ?Response
-    {
-        $key = CacheKey::fromRequest($request);
+    public function lookup(
+        Request $request,
+        array $queryParams,
+    ): ?Response {
+        $key = CacheKey::fromRequest($request, $queryParams);
         $path = $this->pagePath($key->hash());
 
         if (!file_exists($path)) {
@@ -77,7 +94,13 @@ readonly class FilePageCacheDriver implements PageCacheInterface
         Response $response,
         CachePolicy $policy,
     ): Response {
-        $key = CacheKey::fromRequest($request);
+        $key = CacheKey::fromRequest($request, $policy->queryParams);
+        $hash = $key->hash();
+
+        if (!$this->claimVariant($key->path, $hash)) {
+            return $response;
+        }
+
         $ttl = $policy->ttl > 0 ? $policy->ttl : $this->pageCache->defaultTtl();
         $now = $this->clock->now()->getTimestamp();
 
@@ -91,14 +114,83 @@ readonly class FilePageCacheDriver implements PageCacheInterface
         ];
 
         $this->ensureDirectory($this->pagesDir());
-        $this->atomicWrite($this->pagePath($key->hash()), serialize($data));
+        $this->atomicWrite($this->pagePath($hash), serialize($data));
 
         foreach ($policy->tags as $tag) {
-            $this->ensureDirectory($this->tagsDir());
-            $this->appendToTagIndex($this->tagPath($tag), $key->hash());
+            $tagDir = $this->tagDir($tag);
+            $this->ensureDirectory($tagDir);
+            touch($tagDir . '/' . $hash);
         }
 
         return $response;
+    }
+
+    /**
+     * Record the page as a variant of its path, refusing it when the path already holds
+     * page-cache.max_variants_per_path other entries.
+     *
+     * Markers whose page file is gone (expired, purged) are swept before refusing, so the
+     * limit counts live entries. Concurrent stores may briefly overshoot the limit.
+     *
+     * @throws ConfigNotFoundException|PageCacheException
+     */
+    private function claimVariant(
+        string $path,
+        string $hash,
+    ): bool {
+        $max = $this->pageCache->maxVariantsPerPath();
+
+        if ($max === 0) {
+            return true;
+        }
+
+        $variantDir = $this->variantsDir() . '/' . hash('xxh128', $path);
+        $marker = $variantDir . '/' . $hash;
+
+        if (file_exists($marker)) {
+            return true;
+        }
+
+        $this->ensureDirectory($variantDir);
+
+        if ($this->countVariants($variantDir, $max, sweep: false) >= $max
+            && $this->countVariants($variantDir, $max, sweep: true) >= $max
+        ) {
+            return false;
+        }
+
+        touch($marker);
+
+        return true;
+    }
+
+    /**
+     * Count variant markers in a directory, stopping at $max. With $sweep, markers whose page
+     * file no longer exists are deleted instead of counted.
+     *
+     * @throws ConfigNotFoundException
+     */
+    private function countVariants(
+        string $variantDir,
+        int $max,
+        bool $sweep,
+    ): int {
+        $count = 0;
+
+        foreach (new FilesystemIterator($variantDir) as $marker) {
+            /** @var SplFileInfo $marker */
+            if ($sweep && !file_exists($this->pagePath($marker->getFilename()))) {
+                @unlink($marker->getPathname());
+
+                continue;
+            }
+
+            if (++$count >= $max) {
+                break;
+            }
+        }
+
+        return $count;
     }
 
     /**
@@ -171,49 +263,75 @@ readonly class FilePageCacheDriver implements PageCacheInterface
     }
 
     /**
+     * Delete every page carrying the tag, then the tag's marker directory.
+     *
      * @throws ConfigNotFoundException
      */
     public function purgeTag(string $tag): bool
     {
-        $tagIndexPath = $this->tagPath($tag);
+        $success = $this->purgeLegacyTagIndex($tag);
+        $tagDir = $this->tagDir($tag);
 
-        if (!file_exists($tagIndexPath)) {
+        if (!is_dir($tagDir)) {
+            return $success;
+        }
+
+        foreach (new FilesystemIterator($tagDir) as $marker) {
+            /** @var SplFileInfo $marker */
+            $this->deletePage($marker->getFilename());
+
+            if (!@unlink($marker->getPathname()) && file_exists($marker->getPathname())) {
+                $success = false;
+            }
+        }
+
+        @rmdir($tagDir);
+
+        return $success;
+    }
+
+    /**
+     * Purge a serialized tag index written by earlier versions of this driver, so pages cached
+     * before an upgrade are still purged by tag.
+     *
+     * @throws ConfigNotFoundException
+     */
+    private function purgeLegacyTagIndex(string $tag): bool
+    {
+        $indexPath = $this->tagsDir() . '/' . hash('xxh128', $tag) . '.tag';
+
+        if (!file_exists($indexPath)) {
             return true;
         }
 
-        $fp = fopen($tagIndexPath, 'r+');
-        if ($fp === false) {
-            return false;
-        }
+        $content = file_get_contents($indexPath);
+        $decoded = is_string($content) && $content !== ''
+            ? unserialize($content, ['allowed_classes' => false])
+            : [];
 
-        try {
-            flock($fp, LOCK_EX);
-            $content = stream_get_contents($fp);
-            $decoded = $content !== false && $content !== '' ? unserialize(
-                $content,
-                ['allowed_classes' => false],
-            ) : [];
-            $hashes = is_array($decoded) ? $decoded : [];
-
-            foreach ($hashes as $hash) {
-                if (!is_string($hash)) {
-                    continue;
-                }
-                $pagePath = $this->pagePath($hash);
-                if (file_exists($pagePath)) {
-                    @unlink($pagePath);
-                }
+        foreach (is_array($decoded) ? $decoded : [] as $hash) {
+            if (is_string($hash)) {
+                $this->deletePage($hash);
             }
-
-            ftruncate($fp, 0);
-        } finally {
-            flock($fp, LOCK_UN);
-            fclose($fp);
         }
 
-        @unlink($tagIndexPath);
+        return @unlink($indexPath) || !file_exists($indexPath);
+    }
 
-        return true;
+    /**
+     * @throws ConfigNotFoundException
+     */
+    private function deletePage(string $hash): void
+    {
+        if (preg_match(self::HASH_PATTERN, $hash) !== 1) {
+            return;
+        }
+
+        $pagePath = $this->pagePath($hash);
+
+        if (file_exists($pagePath)) {
+            @unlink($pagePath);
+        }
     }
 
     /**
@@ -223,24 +341,42 @@ readonly class FilePageCacheDriver implements PageCacheInterface
     {
         $pagesDir = $this->pagesDir();
 
-        if (!is_dir($pagesDir)) {
-            return true;
-        }
-
-        $pageFiles = glob($pagesDir . '/*.cache') ?: [];
-        foreach ($pageFiles as $file) {
-            @unlink($file);
-        }
-
-        $tagsDir = $this->tagsDir();
-        if (is_dir($tagsDir)) {
-            $tagFiles = glob($tagsDir . '/*.tag') ?: [];
-            foreach ($tagFiles as $file) {
+        if (is_dir($pagesDir)) {
+            foreach (glob($pagesDir . '/*.cache') ?: [] as $file) {
                 @unlink($file);
             }
         }
 
+        $this->clearMarkerDirectories($this->tagsDir());
+        $this->clearMarkerDirectories($this->variantsDir());
+
         return true;
+    }
+
+    /**
+     * Remove the marker directories (and legacy *.tag index files) under a tags or variants directory.
+     */
+    private function clearMarkerDirectories(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+
+        foreach (new FilesystemIterator($dir) as $entry) {
+            /** @var SplFileInfo $entry */
+            if (!$entry->isDir()) {
+                @unlink($entry->getPathname());
+
+                continue;
+            }
+
+            foreach (new FilesystemIterator($entry->getPathname()) as $marker) {
+                /** @var SplFileInfo $marker */
+                @unlink($marker->getPathname());
+            }
+
+            @rmdir($entry->getPathname());
+        }
     }
 
     /**
@@ -296,35 +432,17 @@ readonly class FilePageCacheDriver implements PageCacheInterface
     /**
      * @throws ConfigNotFoundException
      */
-    private function tagPath(string $tag): string
+    private function tagDir(string $tag): string
     {
-        return $this->tagsDir() . '/' . hash('xxh128', $tag) . '.tag';
+        return $this->tagsDir() . '/' . hash('xxh128', $tag);
     }
 
-    private function appendToTagIndex(
-        string $tagIndexPath,
-        string $pageHash,
-    ): void {
-        $fp = fopen($tagIndexPath, 'cb+');
-        if ($fp === false) {
-            return;
-        }
-        try {
-            flock($fp, LOCK_EX);
-            $existing = stream_get_contents($fp);
-            $decoded = $existing !== false && $existing !== ''
-                ? unserialize($existing, ['allowed_classes' => false])
-                : [];
-            $hashes = is_array($decoded) ? $decoded : [];
-            $hashes = array_values(array_unique([...$hashes, $pageHash]));
-            ftruncate($fp, 0);
-            rewind($fp);
-            fwrite($fp, serialize($hashes));
-            fflush($fp);
-        } finally {
-            flock($fp, LOCK_UN);
-            fclose($fp);
-        }
+    /**
+     * @throws ConfigNotFoundException
+     */
+    private function variantsDir(): string
+    {
+        return $this->resolvedPath() . '/variants';
     }
 
     /**
