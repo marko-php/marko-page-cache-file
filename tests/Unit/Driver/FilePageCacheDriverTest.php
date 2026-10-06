@@ -316,3 +316,72 @@ it('misses a stored page once the clock passes its expiry', function (): void {
     expect($this->driver->lookup($request))->toBeNull()
         ->and(file_exists($cacheFile))->toBeFalse();
 });
+
+it('serves an entry stored with a zero effective ttl', function (): void {
+    $driver = createPageCacheFileDriver($this->tmpDir, defaultTtl: 0, clock: $this->clock);
+    $request = createTestRequest('GET', '/forever');
+
+    $driver->store($request, new Response(body: 'forever', statusCode: 200), new CachePolicy(ttl: 0, tags: []));
+
+    expect($driver->lookup($request)?->body())->toBe('forever');
+});
+
+it('keeps serving a never-expiring entry however far the clock advances', function (): void {
+    $driver = createPageCacheFileDriver($this->tmpDir, defaultTtl: 0, clock: $this->clock);
+    $request = createTestRequest('GET', '/forever');
+
+    $driver->store($request, new Response(body: 'forever', statusCode: 200), new CachePolicy(ttl: 0, tags: []));
+    $this->clock->travel('+50 years');
+
+    expect($driver->lookup($request)?->body())->toBe('forever');
+});
+
+it('removes a never-expiring entry with purgeUrl, purgeTag and clear', function (): void {
+    $driver = createPageCacheFileDriver($this->tmpDir, defaultTtl: 0, clock: $this->clock);
+    $request = createTestRequest('GET', '/forever');
+    $response = new Response(body: 'forever', statusCode: 200);
+    $policy = new CachePolicy(ttl: 0, tags: ['pages']);
+
+    $driver->store($request, $response, $policy);
+    $servedBeforePurge = $driver->lookup($request);
+    $driver->purgeUrl('http://example.com/forever');
+    $afterPurgeUrl = $driver->lookup($request);
+
+    $driver->store($request, $response, $policy);
+    $driver->purgeTag('pages');
+    $afterPurgeTag = $driver->lookup($request);
+
+    $driver->store($request, $response, $policy);
+    $driver->clear();
+    $afterClear = $driver->lookup($request);
+
+    expect($servedBeforePurge)->toBeInstanceOf(Response::class)
+        ->and($afterPurgeUrl)->toBeNull()
+        ->and($afterPurgeTag)->toBeNull()
+        ->and($afterClear)->toBeNull();
+});
+
+it('treats a payload without expires_at as a miss', function (): void {
+    $request = createTestRequest('GET', '/corrupt');
+    writePageCachePayload($this->tmpDir, CacheKey::fromRequest($request)->hash(), [
+        'status_code' => 200,
+        'body' => 'corrupt',
+        'headers' => [],
+        'created_at' => $this->clock->now()->getTimestamp(),
+    ]);
+
+    expect($this->driver->lookup($request))->toBeNull();
+});
+
+it('treats a payload with a non-integer expires_at as a miss', function (): void {
+    $request = createTestRequest('GET', '/corrupt');
+    writePageCachePayload($this->tmpDir, CacheKey::fromRequest($request)->hash(), [
+        'status_code' => 200,
+        'body' => 'corrupt',
+        'headers' => [],
+        'expires_at' => '2099-01-01',
+        'created_at' => $this->clock->now()->getTimestamp(),
+    ]);
+
+    expect($this->driver->lookup($request))->toBeNull();
+});

@@ -10,6 +10,7 @@ use Marko\PageCache\CacheKey;
 use Marko\PageCache\CachePolicy;
 use Marko\PageCache\Config\PageCacheConfig;
 use Marko\PageCache\Contracts\PageCacheInterface;
+use Marko\PageCache\Exceptions\PageCacheException;
 use Marko\Routing\Http\Request;
 use Marko\Routing\Http\Response;
 use Psr\Clock\ClockInterface;
@@ -44,14 +45,17 @@ readonly class FilePageCacheDriver implements PageCacheInterface
         $data = unserialize($content, ['allowed_classes' => false]);
 
         if (!is_array($data)
-            || !isset($data['status_code'], $data['body'], $data['headers'], $data['expires_at'])
+            || !isset($data['status_code'], $data['body'], $data['headers'])
+            || !array_key_exists('expires_at', $data)
             || !is_int($data['status_code'])
             || !is_string($data['body'])
             || !is_array($data['headers'])
+            || !($data['expires_at'] === null || is_int($data['expires_at']))
         ) {
             return null;
         }
 
+        // A null expiry means the entry never expires; it lives until purged by URL, by tag or cleared.
         if ($data['expires_at'] !== null && $data['expires_at'] < $this->clock->now()->getTimestamp()) {
             @unlink($path);
 
@@ -66,7 +70,7 @@ readonly class FilePageCacheDriver implements PageCacheInterface
     }
 
     /**
-     * @throws ConfigNotFoundException|RandomException
+     * @throws ConfigNotFoundException|PageCacheException|RandomException
      */
     public function store(
         Request $request,

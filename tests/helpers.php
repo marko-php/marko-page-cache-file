@@ -70,19 +70,25 @@ function cleanupPageCacheDir(string $dir): void
 
 function writeExpiredPageCacheEntry(string $tmpDir, string $hash, int $now): void
 {
-    $pagesDir = $tmpDir . '/pages';
-    if (!is_dir($pagesDir)) {
-        mkdir($pagesDir, 0755, true);
-    }
-
-    $data = [
+    writePageCachePayload($tmpDir, $hash, [
         'status_code' => 200,
         'body' => 'expired body',
         'headers' => [],
         'tags' => [],
         'expires_at' => $now - 10,
         'created_at' => $now - 20,
-    ];
+    ]);
+}
+
+/**
+ * @param array<string, mixed> $data
+ */
+function writePageCachePayload(string $tmpDir, string $hash, array $data): void
+{
+    $pagesDir = $tmpDir . '/pages';
+    if (!is_dir($pagesDir)) {
+        mkdir($pagesDir, 0755, true);
+    }
 
     file_put_contents($pagesDir . '/' . $hash . '.cache', serialize($data));
 }
