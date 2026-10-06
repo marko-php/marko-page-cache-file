@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../helpers.php';
 
 use Marko\PageCache\CacheKey;
 use Marko\PageCache\CachePolicy;
+use Marko\PageCache\Exceptions\PageCacheException;
 use Marko\Routing\Http\Response;
 use Marko\Testing\Fake\FakeClock;
 
@@ -142,6 +143,49 @@ it('returns true from purgeUrl when no entry exists', function (): void {
     $result = $this->driver->purgeUrl('http://example.com/nonexistent');
 
     expect($result)->toBeTrue();
+});
+
+it('keeps pages for the same path on different hosts apart', function (): void {
+    $policy = new CachePolicy(ttl: 3600, tags: []);
+    $this->driver->store(createTestRequest('GET', '/home', host: 'a.example.com'), new Response(body: 'A'), $policy);
+
+    expect($this->driver->lookup(createTestRequest('GET', '/home', host: 'b.example.com')))->toBeNull()
+        ->and($this->driver->lookup(createTestRequest('GET', '/home', host: 'a.example.com'))?->body())->toBe('A');
+});
+
+it('keeps pages for the same path over http and https apart', function (): void {
+    $policy = new CachePolicy(ttl: 3600, tags: []);
+    $this->driver->store(createTestRequest('GET', '/home', https: true), new Response(body: 'secure'), $policy);
+
+    expect($this->driver->lookup(createTestRequest('GET', '/home')))->toBeNull()
+        ->and($this->driver->lookup(createTestRequest('GET', '/home', https: true))?->body())->toBe('secure');
+});
+
+it('purges a URL over both http and https', function (): void {
+    $policy = new CachePolicy(ttl: 3600, tags: []);
+    $this->driver->store(createTestRequest('GET', '/home'), new Response(body: 'plain'), $policy);
+    $this->driver->store(createTestRequest('GET', '/home', https: true), new Response(body: 'secure'), $policy);
+
+    $this->driver->purgeUrl('https://example.com/home');
+
+    expect($this->driver->lookup(createTestRequest('GET', '/home')))->toBeNull()
+        ->and($this->driver->lookup(createTestRequest('GET', '/home', https: true)))->toBeNull();
+});
+
+it('purges a relative URL for every exact trusted host', function (): void {
+    $driver = createPageCacheFileDriver($this->tmpDir, trustedHosts: ['example.com', 'www.example.com', '*.cdn.test']);
+    $policy = new CachePolicy(ttl: 3600, tags: []);
+    $driver->store(createTestRequest('GET', '/home'), new Response(body: 'apex'), $policy);
+    $driver->store(createTestRequest('GET', '/home', host: 'www.example.com'), new Response(body: 'www'), $policy);
+
+    expect($driver->purgeUrl('/home'))->toBeTrue()
+        ->and($driver->lookup(createTestRequest('GET', '/home')))->toBeNull()
+        ->and($driver->lookup(createTestRequest('GET', '/home', host: 'www.example.com')))->toBeNull();
+});
+
+it('fails loudly when purging a relative URL without any trusted host', function (): void {
+    expect(fn () => $this->driver->purgeUrl('/home'))
+        ->toThrow(PageCacheException::class, "Cannot purge '/home'");
 });
 
 it(

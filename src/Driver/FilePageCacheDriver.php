@@ -102,23 +102,72 @@ readonly class FilePageCacheDriver implements PageCacheInterface
     }
 
     /**
-     * @throws ConfigNotFoundException
+     * Purge the GET entry for the URL over both http and https.
+     *
+     * An absolute URL purges its own host; a relative URL purges every exact (non-wildcard)
+     * host listed in page-cache.trusted_hosts.
+     *
+     * @throws ConfigNotFoundException|PageCacheException
      */
     public function purgeUrl(string $url): bool
     {
         $parsed = parse_url($url);
-        $path = $parsed['path'] ?? '/';
-        $rawQuery = $parsed['query'] ?? '';
-        $query = CacheKey::normalizeQuery($rawQuery);
 
-        $key = new CacheKey(method: 'GET', path: $path, query: $query);
-        $filePath = $this->pagePath($key->hash());
-
-        if (!file_exists($filePath)) {
-            return true;
+        if ($parsed === false) {
+            return false;
         }
 
-        return unlink($filePath);
+        $path = $parsed['path'] ?? '/';
+        $query = CacheKey::normalizeQuery($parsed['query'] ?? '');
+        $hosts = $this->purgeHosts($url, $parsed);
+        $success = true;
+
+        foreach ($hosts as $host) {
+            foreach (['http', 'https'] as $scheme) {
+                $key = new CacheKey(
+                    method: 'GET',
+                    scheme: $scheme,
+                    host: CacheKey::normalizeHost($host, $scheme),
+                    path: $path,
+                    query: $query,
+                );
+                $filePath = $this->pagePath($key->hash());
+
+                if (file_exists($filePath) && !unlink($filePath)) {
+                    $success = false;
+                }
+            }
+        }
+
+        return $success;
+    }
+
+    /**
+     * @param array<string, int|string> $parsed
+     * @return array<string>
+     *
+     * @throws ConfigNotFoundException|PageCacheException
+     */
+    private function purgeHosts(
+        string $url,
+        array $parsed,
+    ): array {
+        if (isset($parsed['host'])) {
+            $host = (string) $parsed['host'];
+
+            return [isset($parsed['port']) ? "$host:{$parsed['port']}" : $host];
+        }
+
+        $hosts = array_values(array_filter(
+            $this->pageCache->trustedHosts(),
+            static fn (string $host): bool => strpbrk($host, '*?[') === false,
+        ));
+
+        if ($hosts === []) {
+            throw PageCacheException::purgeUrlWithoutHost($url);
+        }
+
+        return $hosts;
     }
 
     /**

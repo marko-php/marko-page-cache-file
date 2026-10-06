@@ -10,7 +10,7 @@ use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
 use Psr\Clock\ClockInterface;
 
-function createPageCacheConfig(string $path, int $defaultTtl = 3600): PageCacheConfig
+function createPageCacheConfig(string $path, int $defaultTtl = 3600, array $trustedHosts = []): PageCacheConfig
 {
     return new PageCacheConfig(new FakeConfigRepository([
         'page-cache.driver' => 'file',
@@ -18,24 +18,34 @@ function createPageCacheConfig(string $path, int $defaultTtl = 3600): PageCacheC
         'page-cache.default_ttl' => $defaultTtl,
         'page-cache.cacheable_status_codes' => [200],
         'page-cache.cacheable_methods' => ['GET'],
+        'page-cache.trusted_hosts' => $trustedHosts,
     ]));
 }
 
-function createTestRequest(string $method = 'GET', string $path = '/test', array $query = []): Request
-{
-    return new Request(
-        server: ['REQUEST_METHOD' => $method, 'REQUEST_URI' => $path],
-        query: $query,
-    );
+function createTestRequest(
+    string $method = 'GET',
+    string $path = '/test',
+    array $query = [],
+    string $host = 'example.com',
+    bool $https = false,
+): Request {
+    $server = ['REQUEST_METHOD' => $method, 'REQUEST_URI' => $path, 'HTTP_HOST' => $host];
+
+    if ($https) {
+        $server['HTTPS'] = 'on';
+    }
+
+    return new Request(server: $server, query: $query);
 }
 
 function createPageCacheFileDriver(
     string $tmpDir,
     int $defaultTtl = 3600,
     ?ClockInterface $clock = null,
+    array $trustedHosts = [],
 ): FilePageCacheDriver {
     return new FilePageCacheDriver(
-        createPageCacheConfig($tmpDir, $defaultTtl),
+        createPageCacheConfig($tmpDir, $defaultTtl, $trustedHosts),
         new ProjectPaths($tmpDir),
         $clock ?? new FakeClock(),
     );
